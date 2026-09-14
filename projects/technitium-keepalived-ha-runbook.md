@@ -499,7 +499,7 @@ sudo systemctl status dns
 
 ## 4.5 Configure DNS-over-QUIC as an Upstream Forwarder
 
-If the goal is to encrypt Technitium's upstream DNS traffic, configure a forwarder that supports DoQ from the Technitium web console.
+Installing `libmsquic` only gives Technitium the ability to use QUIC. To actually encrypt upstream DNS queries with DNS-over-QUIC, configure one or more **DoQ-capable forwarders** in Technitium.
 
 Conceptually:
 
@@ -524,15 +524,198 @@ UDP/853
 
 The fact that packet captures show UDP is expected: QUIC runs over UDP while encrypting the DNS payload.
 
-Verify outbound DoQ traffic:
+### Configure the forwarder in Technitium
+
+From the Technitium web console:
+
+1. Go to:
+
+   ```text
+   Settings -> Proxy & Forwarders
+   ```
+
+2. Under **Forwarders**, add the desired upstream resolver address or addresses.
+3. Set the **Forwarder Protocol** to:
+
+   ```text
+   QUIC
+   ```
+
+4. Enable DNSSEC validation if it is desired for forwarded responses.
+5. Save the settings.
+
+Technitium supports a name-server address format that can include both the TLS hostname and a fixed IP address. This is useful because it avoids needing to resolve the forwarder's hostname before connecting while still retaining the hostname for TLS certificate validation.
+
+Example format:
+
+```text
+dns.example.net (192.0.2.53:853)
+```
+
+When the protocol is set to `QUIC`, port `853` is the normal DoQ port.
+
+### Example: Quad9 over DoQ
+
+Quad9 provides DNS-over-QUIC on its resolver hostnames over port 853.
+
+For the standard secure/blocking service, configure:
+
+```text
+dns.quad9.net (9.9.9.9:853)
+dns.quad9.net (149.112.112.112:853)
+```
+
+and set:
+
+```text
+Forwarder Protocol: QUIC
+```
+
+For IPv6-capable environments, Quad9 also publishes IPv6 resolver addresses. Only configure IPv6 forwarders when the DNS host has working IPv6 connectivity.
+
+The important part is that the hostname remains:
+
+```text
+dns.quad9.net
+```
+
+so Technitium can validate the TLS identity while connecting directly to the configured resolver IP.
+
+### Example: AdGuard DNS over DoQ
+
+AdGuard's standard public DNS service supports DNS-over-QUIC using:
+
+```text
+dns.adguard-dns.com
+```
+
+with standard resolver addresses:
+
+```text
+94.140.14.14
+94.140.15.15
+```
+
+Example Technitium entries:
+
+```text
+dns.adguard-dns.com (94.140.14.14:853)
+dns.adguard-dns.com (94.140.15.15:853)
+```
+
+with:
+
+```text
+Forwarder Protocol: QUIC
+```
+
+AdGuard also provides other resolver profiles such as family-filtering and unfiltered services. Use the hostname and addresses documented for the specific service profile being selected.
+
+### Do not mix up inbound and outbound DoQ
+
+These are separate features:
+
+```text
+Technitium -> Public Resolver
+```
+
+uses the **Forwarders** configuration.
+
+```text
+Client -> Technitium
+```
+
+uses the **Optional Protocols** configuration described in the next section.
+
+An administrator who only wants encrypted upstream DNS does **not** need to expose UDP/853 inbound to clients.
+
+### Firewall requirements for upstream DoQ
+
+If UFW uses its normal default outbound policy of `allow`, no additional outbound rule is usually required.
+
+Check:
+
+```bash
+sudo ufw status verbose
+```
+
+If outbound traffic is restricted, allow UDP/853 to the selected resolver addresses.
+
+Example for Quad9:
+
+```bash
+sudo ufw allow out to 9.9.9.9 port 853 proto udp
+sudo ufw allow out to 149.112.112.112 port 853 proto udp
+```
+
+Example for AdGuard:
+
+```bash
+sudo ufw allow out to 94.140.14.14 port 853 proto udp
+sudo ufw allow out to 94.140.15.15 port 853 proto udp
+```
+
+### Verify that DoQ is actually being used
+
+Packet capture is the clearest transport-level check:
 
 ```bash
 sudo tcpdump -ni <INTERFACE> 'udp port 853'
 ```
 
-Generate an uncached query from a client and confirm UDP/853 traffic appears between Technitium and the configured upstream resolver.
+Then generate a fresh DNS request through Technitium:
 
-If the host uses a restrictive **outbound** firewall policy, explicitly allow UDP/853 to the chosen upstream DNS provider.
+```bash
+dig @127.0.0.1 example.com A
+```
+
+or from a LAN client:
+
+```bash
+dig @<DNS_VIRTUAL_IP> example.com A
+```
+
+You should see traffic similar to:
+
+```text
+<DNS_NODE_IP>.<EPHEMERAL_PORT> > <UPSTREAM_DNS_IP>.853: UDP
+<UPSTREAM_DNS_IP>.853 > <DNS_NODE_IP>.<EPHEMERAL_PORT>: UDP
+```
+
+That is expected for DoQ. The DNS payload itself is carried inside encrypted QUIC traffic, so `tcpdump` sees UDP packets but should not decode the upstream DNS query name as plaintext.
+
+For Quad9 specifically, a fresh query can also be used to confirm that Quad9 is being reached:
+
+```bash
+dig @<DNS_VIRTUAL_IP> proto.on.quad9.net TXT
+```
+
+Provider-side protocol-reporting behavior can change over time, so packet capture of UDP/853 remains the most direct local verification that Technitium is using QUIC.
+
+### Failure behavior
+
+If Technitium is configured with:
+
+```text
+Forwarder Protocol: QUIC
+```
+
+it should be treated as a deliberate protocol choice. Do not assume a failed DoQ connection will automatically downgrade to plaintext UDP/53.
+
+If DoQ is unreliable on a network, troubleshoot:
+
+- outbound UDP/853 filtering;
+- NAT/firewall handling of QUIC;
+- `libmsquic` installation;
+- system time and TLS validation;
+- upstream-provider availability.
+
+If QUIC cannot be made reliable, DNS-over-TLS is a reasonable encrypted fallback:
+
+```text
+Forwarder Protocol: TLS
+TCP/853
+```
 
 ---
 
@@ -1987,10 +2170,13 @@ This is generally preferable to allowing a DNS node with a failed resolver servi
 
 Abbreviated references used by this runbook:
 
+- **Technitium DoQ** — Technitium Blog, *Configuring DNS-over-QUIC and HTTPS/3 For Technitium DNS Server*.
+- **Technitium Forwarder Address Format** — Technitium DNS Server API documentation, *Name Server Address Format*.
+- **Quad9 DoQ** — Quad9, *Quad9 Enables DNS Over HTTP/3 and DNS Over QUIC*.
+- **AdGuard DoQ** — AdGuard DNS Knowledge Base, *Known DNS Providers*.
 - **Technitium Clustering** — Technitium Blog, *Understanding Clustering And How To Configure It*.
 - **Technitium v14** — Technitium Blog, *Technitium DNS Server v14 Released!*.
 - **Technitium Catalog Zones** — Technitium Blog, *Technitium DNS Server v13 Released!*.
 - **systemd time sync** — Debian `timedatectl(1)`, `systemd-timesyncd(8)`, and `timesyncd.conf(5)`.
 - **chrony** — chrony documentation for `chronyc`, source status, tracking, and `chrony.conf`.
 - **Keepalived/VRRP** — Keepalived documentation for VRRP, tracked scripts, multicast/unicast, and IPVS.
-
