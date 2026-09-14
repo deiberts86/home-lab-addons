@@ -1,8 +1,53 @@
 # Technitium DNS HA with Keepalived
 
+**NOTE** This was just a fun homelab setup to make my DNS for my home and lab to be more reliable.
+
 This runbook describes how to install Technitium DNS Server and place a highly available IPv4 virtual IP (VIP) in front of two clustered Technitium nodes using Keepalived/VRRP and UFW.
 
 The architecture is intentionally **OS-agnostic**, but the implementation commands in this guide are written for **Debian-family Linux distributions** that use APT and systemd, such as Debian and Ubuntu. The examples intentionally use placeholders so the procedure can be reused in different environments.
+
+---
+
+## Table of Contents
+
+- [1. Architecture](#1-architecture)
+- [2. Example Variables](#2-example-variables)
+- [3. Requirements](#3-requirements)
+  - [3.1 Operating System](#31-operating-system)
+  - [3.2 Network Requirements](#32-network-requirements)
+  - [3.3 DNS Requirements](#33-dns-requirements)
+- [4. Install Technitium and Required Packages](#4-install-technitium-and-required-packages)
+  - [4.1 Install Base Packages on Debian-Family Systems](#41-install-base-packages-on-debian-family-systems)
+  - [4.2 Install Technitium DNS Server](#42-install-technitium-dns-server)
+  - [4.3 Verify DNS Port Availability](#43-verify-dns-port-availability)
+  - [4.4 Optional but Recommended: Install DNS-over-QUIC Support](#44-optional-but-recommended-install-dns-over-quic-support)
+  - [4.5 Configure DNS-over-QUIC as an Upstream Forwarder](#45-configure-dns-over-quic-as-an-upstream-forwarder)
+  - [4.6 Optional: Serve DNS-over-QUIC to Clients](#46-optional-serve-dns-over-quic-to-clients)
+  - [4.7 Initial Technitium Configuration](#47-initial-technitium-configuration)
+  - [4.8 Verify Time Synchronization](#48-verify-time-synchronization)
+  - [4.9 Configure Technitium Clustering](#49-configure-technitium-clustering)
+- [5. Verify the Physical Interfaces](#5-verify-the-physical-interfaces)
+- [6. Configure the Technitium Health Check](#6-configure-the-technitium-health-check)
+- [7. Configure UFW](#7-configure-ufw)
+- [8. Configure VRRP Firewall Rules](#8-configure-vrrp-firewall-rules)
+- [9. Remove an Incorrect UFW Rule](#9-remove-an-incorrect-ufw-rule)
+- [10. Configure Keepalived](#10-configure-keepalived)
+- [11. Keepalived Configuration Notes](#11-keepalived-configuration-notes)
+- [12. Optional: Legacy VRRP Authentication](#12-optional-legacy-vrrp-authentication)
+- [13. Optional: Unicast VRRP](#13-optional-unicast-vrrp)
+- [14. Validate the Keepalived Configuration](#14-validate-the-keepalived-configuration)
+- [15. Verify VIP Ownership](#15-verify-vip-ownership)
+- [16. Verify VRRP Traffic](#16-verify-vrrp-traffic)
+- [17. Why tcpdump Can See VRRP While Keepalived Cannot](#17-why-tcpdump-can-see-vrrp-while-keepalived-cannot)
+- [18. Test DNS Through the VIP](#18-test-dns-through-the-vip)
+- [19. Perform a Real DNS-Service Failover Test](#19-perform-a-real-dns-service-failover-test)
+- [20. Expected Steady-State Behavior](#20-expected-steady-state-behavior)
+- [21. Troubleshooting](#21-troubleshooting)
+- [22. Useful Operational Commands](#22-useful-operational-commands)
+- [23. Firewall Summary](#23-firewall-summary)
+- [24. Final Validation Checklist](#24-final-validation-checklist)
+- [25. Reference Behavior](#25-reference-behavior)
+- [26. References](#26-references)
 
 ---
 
@@ -77,9 +122,9 @@ For example, one node can use `eth0` while the other uses `enp1s0`.
 
 ---
 
-## 3. Requirements
+# 3. Requirements
 
-### 3.1 Operating System
+## 3.1 Operating System
 
 The HA design itself is not tied to a specific Linux distribution. Keepalived/VRRP, Technitium, and the networking concepts apply broadly to Linux.
 
@@ -118,7 +163,7 @@ If the selected platform uses a different package manager, service manager, or f
 
 ---
 
-### 3.2 Network Requirements
+## 3.2 Network Requirements
 
 The two Keepalived nodes should have:
 
@@ -130,7 +175,8 @@ The two Keepalived nodes should have:
 - VRRP IP protocol `112` permitted between the nodes.
 - Access to multicast address `224.0.0.18`.
 
-#### Why multicast is the default in this runbook
+
+### Why multicast is the default in this runbook
 
 This runbook uses standard multicast VRRP by default because it is the native VRRP operating model, requires less peer-specific configuration, and works cleanly when both DNS nodes share the same Layer-2 network. It also keeps the configuration easy to expand if another VRRP participant is ever added.
 
@@ -159,7 +205,7 @@ VRRP itself is IP protocol:
 112
 ```
 
-#### VIP requirements
+### VIP requirements
 
 The VIP must:
 
@@ -172,7 +218,7 @@ Routing/firewall infrastructure between client VLANs and the DNS subnet must all
 
 ---
 
-### 3.3 DNS Requirements
+## 3.3 DNS Requirements
 
 Both Technitium nodes should:
 
@@ -194,11 +240,11 @@ The query should return a valid SOA response on both nodes.
 
 ---
 
-## 4. Install Technitium and Required Packages
+# 4. Install Technitium and Required Packages
 
 Perform the following steps on **both DNS nodes**.
 
-### 4.1 Install Base Packages on Debian-Family Systems
+## 4.1 Install Base Packages on Debian-Family Systems
 
 Install the base Debian packages used by this runbook:
 
@@ -228,7 +274,7 @@ Package purposes:
 
 ---
 
-### 4.2 Install Technitium DNS Server
+## 4.2 Install Technitium DNS Server
 
 Technitium provides an automated Linux installer/updater.
 
@@ -244,7 +290,7 @@ The installer installs Technitium and its required runtime components, configure
 dns.service
 ```
 
-#### Installer download troubleshooting
+### Installer download troubleshooting
 
 The official automated installer is retrieved from:
 
@@ -324,7 +370,7 @@ Open the console on each node and complete the initial administrator setup.
 
 ---
 
-### 4.3 Verify DNS Port Availability
+## 4.3 Verify DNS Port Availability
 
 Technitium must be able to bind TCP and UDP port 53.
 
@@ -359,7 +405,7 @@ dig @127.0.0.1 example.com A
 
 ---
 
-### 4.4 Optional but Recommended: Install DNS-over-QUIC Support
+## 4.4 Optional but Recommended: Install DNS-over-QUIC Support
 
 Technitium uses Microsoft's **MsQuic** library for DNS-over-QUIC (DoQ) and HTTP/3 support on Linux.
 
@@ -375,7 +421,7 @@ This package is **not required** if the deployment will only use traditional DNS
 - provide a DNS-over-QUIC listener to clients,
 - or use HTTP/3 support.
 
-#### Debian 13
+### Debian 13
 
 Add Microsoft's Debian 13 package repository:
 
@@ -395,7 +441,7 @@ Then install MsQuic:
 sudo apt install -y libmsquic
 ```
 
-#### Debian 12
+### Debian 12
 
 For Debian 12:
 
@@ -410,7 +456,7 @@ sudo apt update
 sudo apt install -y libmsquic
 ```
 
-#### Other Debian-derived distributions
+### Other Debian-derived distributions
 
 For another Debian-derived distribution, first inspect:
 
@@ -423,7 +469,7 @@ Use the Microsoft repository matching the Debian base release when appropriate.
 
 Do not assume the derived distribution's own `VERSION_ID` is necessarily a valid Microsoft repository path.
 
-#### Verify MsQuic
+### Verify MsQuic
 
 Confirm the package:
 
@@ -451,7 +497,7 @@ sudo systemctl status dns
 
 ---
 
-### 4.5 Configure DNS-over-QUIC as an Upstream Forwarder
+## 4.5 Configure DNS-over-QUIC as an Upstream Forwarder
 
 If the goal is to encrypt Technitium's upstream DNS traffic, configure a forwarder that supports DoQ from the Technitium web console.
 
@@ -490,7 +536,7 @@ If the host uses a restrictive **outbound** firewall policy, explicitly allow UD
 
 ---
 
-### 4.6 Optional: Serve DNS-over-QUIC to Clients
+## 4.6 Optional: Serve DNS-over-QUIC to Clients
 
 Installing `libmsquic` enables the Linux QUIC dependency, but Technitium does not automatically force clients to use DoQ.
 
@@ -512,7 +558,7 @@ This is separate from using DoQ only as an **outbound forwarder**.
 
 ---
 
-### 4.7 Initial Technitium Configuration
+## 4.7 Initial Technitium Configuration
 
 Before configuring Keepalived, complete the basic DNS configuration on both nodes.
 
@@ -539,7 +585,245 @@ Do not proceed to the VIP health check until both commands return successfully.
 
 ---
 
-## 5. Verify the Physical Interfaces
+
+## 4.8 Verify Time Synchronization
+
+Accurate time is important for more than log timestamps. A significantly incorrect clock can break or destabilize:
+
+- DNSSEC validation
+- TSIG validation and zone transfers
+- TLS certificate validation
+- DANE/TLSA validation
+- Technitium cluster communication
+
+Before building the cluster or enabling DNSSEC validation, verify that each DNS node has a working time source.
+
+### If using `systemd-timesyncd`
+
+Check status:
+
+```bash
+timedatectl
+timedatectl timesync-status
+```
+
+Useful indicators:
+
+```text
+System clock synchronized: yes
+NTP service: active
+```
+
+If network time synchronization is disabled:
+
+```bash
+sudo timedatectl set-ntp true
+```
+
+Example sources in `/etc/systemd/timesyncd.conf`:
+
+```ini
+[Time]
+NTP=time.cloudflare.com time.google.com
+FallbackNTP=ntp.ubuntu.com
+```
+
+Restart and verify:
+
+```bash
+sudo systemctl restart systemd-timesyncd
+timedatectl timesync-status
+```
+
+### If using `chrony`
+
+Check synchronization:
+
+```bash
+chronyc tracking
+chronyc sources -v
+chronyc activity
+```
+
+Healthy output should show:
+
+- a real reference source;
+- a non-zero stratum;
+- `Leap status : Normal`;
+- at least one usable source, commonly marked `^*`.
+
+Example `/etc/chrony/chrony.conf` sources:
+
+```conf
+pool ntp.ubuntu.com iburst
+server time.cloudflare.com iburst
+server time.google.com iburst
+```
+
+NIST is another valid option:
+
+```conf
+pool time.nist.gov iburst
+```
+
+Using more than one independent provider is preferable to depending on a single time source.
+
+Restart and verify:
+
+```bash
+sudo systemctl restart chrony
+chronyc tracking
+chronyc sources -v
+```
+
+> **Bootstrap note:** If a DNS appliance boots with a badly incorrect clock and its NTP sources are configured only by hostname, it can create a circular dependency where DNSSEC fails because time is wrong and NTP cannot resolve its source because DNS is unhealthy. Consider retaining at least one reliable numeric NTP source or otherwise ensuring a dependable bootstrap path.
+
+---
+
+## 4.9 Configure Technitium Clustering
+
+Technitium clustering synchronizes supported configuration between multiple Technitium DNS Server instances. It does **not** replace Keepalived/VRRP; Keepalived still controls the shared DNS VIP.
+
+The cluster uses:
+
+- one **Primary** cluster node;
+- one or more **Secondary** cluster nodes;
+- a cluster domain;
+- a special cluster catalog zone;
+- TSIG-secured zone transfers;
+- DANE/TLSA records for authenticated node-to-node HTTPS communication.
+
+### Before clustering
+
+Verify on every node:
+
+- Technitium is running normally.
+- The node has a static IP address.
+- DNS works independently on the physical node IP.
+- System time is synchronized.
+- TCP/53443 is allowed between cluster nodes if using the default Technitium HTTPS management port.
+- The intended cluster domain and node naming scheme are understood before initialization.
+
+### Initialize the Primary node
+
+1. Log in to the Technitium web console on the node that should become the **Primary**.
+2. Go to `Administration -> Cluster`.
+3. Select `Initialize -> New Cluster`.
+4. Enter the **Cluster Domain**.
+
+   Example:
+
+   ```text
+   cluster.example.internal
+   ```
+
+   A private internal domain is fine for an internal DNS deployment.
+
+5. Enter the Primary node's static IP address or addresses.
+6. Complete cluster initialization.
+
+Technitium creates and manages the cluster zone and a special cluster catalog zone. It also creates the TSIG key used to secure cluster-related zone transfers.
+
+> Choose the cluster domain carefully. It cannot simply be renamed later without deleting and recreating the cluster.
+
+### Join a Secondary node
+
+1. Log in to the Technitium web console on the Secondary node.
+2. Go to `Administration -> Cluster`.
+3. Select `Initialize -> Join Cluster`.
+4. Enter the Secondary node's static IP address or addresses.
+5. Enter the **Primary Node URL** shown on the Primary node's Cluster page.
+6. If the cluster domain is private and cannot yet resolve normally, provide the **Primary Node IP Address** explicitly.
+7. Choose certificate validation behavior appropriate for the environment.
+   - If the Primary uses a self-signed certificate during the initial join, the join may require ignoring certificate validation errors.
+   - After joining, cluster nodes use DANE-EE/TLSA records for node authentication.
+8. Enter an administrator username and password from the Primary node.
+9. Join the cluster and allow the initial configuration synchronization to complete.
+
+> Joining a cluster synchronizes configuration from the Primary and can overwrite settings/configuration files on the joining node.
+
+### Verify the cluster
+
+From `Administration -> Cluster`, confirm:
+
+- Primary and Secondary nodes are listed;
+- node state is healthy;
+- the cluster secondary zone is synchronized;
+- the special cluster catalog zone is synchronized.
+
+Verify node resolution:
+
+```bash
+dig @127.0.0.1 <PRIMARY_NODE_FQDN> A +short
+```
+
+Verify the DANE TLSA record used by the cluster web service:
+
+```bash
+dig @127.0.0.1 _53443._tcp.<PRIMARY_NODE_FQDN> TLSA
+```
+
+### Add zones to the cluster catalog
+
+Zones remain independently hosted objects in Technitium. To have a supported zone represented across the cluster, add it to the special **cluster catalog zone**.
+
+Common examples include:
+
+- Primary zones
+- Conditional Forwarder zones
+- Stub zones
+
+Technitium then manages the corresponding member/secondary behavior on the other cluster nodes.
+
+### Force a resync
+
+If a Secondary falls out of sync:
+
+1. Go to `Administration -> Cluster`.
+2. Select the Secondary node with the node selector.
+3. Click `Resync`.
+
+This forces a complete cluster configuration resynchronization from the Primary.
+
+### Cluster troubleshooting checks
+
+If the Secondary reports TSIG, DANE, TLSA, or certificate errors:
+
+- confirm time synchronization first;
+- confirm the cluster TSIG key name, algorithm, and shared secret match;
+- verify the cluster secondary zone is current;
+- verify A/AAAA records for each node;
+- verify TLSA records exist for the node HTTPS service;
+- verify TCP/53443 connectivity between nodes.
+
+Useful checks:
+
+```bash
+chronyc tracking
+```
+
+or:
+
+```bash
+timedatectl
+```
+
+Then:
+
+```bash
+dig @127.0.0.1 <PRIMARY_NODE_FQDN> A +short
+dig @127.0.0.1 _53443._tcp.<PRIMARY_NODE_FQDN> TLSA
+```
+
+and:
+
+```bash
+sudo journalctl -fu dns
+```
+
+---
+
+# 5. Verify the Physical Interfaces
 
 Determine the interface carrying each node's DNS subnet address.
 
@@ -565,7 +849,7 @@ The names can be different between nodes.
 
 ---
 
-## 6. Configure the Technitium Health Check
+# 6. Configure the Technitium Health Check
 
 Create the health-check script on **both nodes**:
 
@@ -611,9 +895,9 @@ A valid SOA record should be returned.
 
 ---
 
-## 7. Configure UFW
+# 7. Configure UFW
 
-### 7.1 Important UFW Status Check
+## 7.1 Important UFW Status Check
 
 Do not rely only on:
 
@@ -643,7 +927,7 @@ Status: active
 
 ---
 
-### 7.2 Required DNS Rules
+## 7.2 Required DNS Rules
 
 At minimum, clients need TCP and UDP DNS access.
 
@@ -677,23 +961,23 @@ sudo ufw allow from <MANAGEMENT_SUBNET> to any port 53443 proto tcp
 
 ---
 
-### 7.3 Optional Technitium Protocols
+## 7.3 Optional Technitium Protocols
 
 Only open these if the corresponding inbound Technitium service is enabled.
 
-#### DNS-over-TLS
+### DNS-over-TLS
 
 ```bash
 sudo ufw allow 853/tcp
 ```
 
-#### DNS-over-QUIC
+### DNS-over-QUIC
 
 ```bash
 sudo ufw allow 853/udp
 ```
 
-#### DNS-over-HTTPS
+### DNS-over-HTTPS
 
 ```bash
 sudo ufw allow 443/tcp
@@ -706,11 +990,11 @@ If Technitium only uses DoQ as an outbound upstream forwarder, an inbound UDP/85
 
 ---
 
-## 8. Configure VRRP Firewall Rules
+# 8. Configure VRRP Firewall Rules
 
 Each node must accept VRRP advertisements from the **other node**.
 
-### Node A
+## Node A
 
 Allow VRRP from Node B:
 
@@ -718,7 +1002,7 @@ Allow VRRP from Node B:
 sudo ufw allow from <DNS_NODE_B_IP> to 224.0.0.18 proto vrrp
 ```
 
-### Node B
+## Node B
 
 Allow VRRP from Node A:
 
@@ -740,13 +1024,13 @@ sudo ufw status numbered
 
 Expected conceptually:
 
-- Node A:
+### Node A
 
 ```text
 224.0.0.18/vrrp    ALLOW IN    <DNS_NODE_B_IP>
 ```
 
-- Node B:
+### Node B
 
 ```text
 224.0.0.18/vrrp    ALLOW IN    <DNS_NODE_A_IP>
@@ -761,7 +1045,7 @@ sudo ufw enable
 
 ---
 
-## 9. Remove an Incorrect UFW Rule
+# 9. Remove an Incorrect UFW Rule
 
 If a VRRP rule is accidentally added to the wrong host, list numbered rules:
 
@@ -785,7 +1069,7 @@ Using the numbered method is generally safest when there is any ambiguity.
 
 ---
 
-## 10. Configure Keepalived
+# 10. Configure Keepalived
 
 Both nodes start in `BACKUP` state.
 
@@ -806,7 +1090,7 @@ This is preferable for DNS because a node with a failed DNS service should not c
 
 ---
 
-### 10.1 Node A Keepalived Configuration
+## 10.1 Node A Keepalived Configuration
 
 Create:
 
@@ -856,7 +1140,7 @@ DNS_NODE_A
 
 ---
 
-### 10.2 Node B Keepalived Configuration
+## 10.2 Node B Keepalived Configuration
 
 Create:
 
@@ -900,7 +1184,7 @@ vrrp_instance DNS_VIP {
 
 ---
 
-## 11. Keepalived Configuration Notes
+# 11. Keepalived Configuration Notes
 
 The following settings must match on both nodes:
 
@@ -937,7 +1221,7 @@ Do not configure `nopreempt` if the desired behavior is for the preferred higher
 
 ---
 
-## 12. Optional: Legacy VRRP Authentication
+# 12. Optional: Legacy VRRP Authentication
 
 Keepalived supports the legacy VRRP `authentication` block.
 
@@ -994,7 +1278,7 @@ Newer Keepalived builds may provide stronger HMAC-based authentication. That is 
 
 ---
 
-## 13. Optional: Unicast VRRP
+# 13. Optional: Unicast VRRP
 
 The primary configuration in this runbook uses **multicast VRRP**, and multicast should remain the default when both DNS nodes share a normal Layer-2 network and multicast works correctly.
 
@@ -1029,7 +1313,7 @@ Unicast:
 <DNS_NODE_A_IP> <--------> <DNS_NODE_B_IP>
 ```
 
-### 13.1 Node A Unicast Configuration
+## 13.1 Node A Unicast Configuration
 
 ```conf
 global_defs {
@@ -1070,7 +1354,7 @@ vrrp_instance DNS_VIP {
 }
 ```
 
-### 13.2 Node B Unicast Configuration
+## 13.2 Node B Unicast Configuration
 
 ```conf
 global_defs {
@@ -1111,19 +1395,19 @@ vrrp_instance DNS_VIP {
 }
 ```
 
-### 13.3 Unicast Firewall Rules
+## 13.3 Unicast Firewall Rules
 
 Unicast VRRP still uses **IP protocol 112**. It does not become TCP or UDP.
 
 When using UFW, allow VRRP directly between the peer addresses.
 
-- Node A:
+### Node A
 
 ```bash
 sudo ufw allow from <DNS_NODE_B_IP> to <DNS_NODE_A_IP> proto vrrp
 ```
 
-- Node B:
+### Node B
 
 ```bash
 sudo ufw allow from <DNS_NODE_A_IP> to <DNS_NODE_B_IP> proto vrrp
@@ -1139,7 +1423,7 @@ sudo tcpdump -ni <INTERFACE> 'ip proto 112'
 
 You should see VRRP packets directly between the node addresses rather than packets addressed to `224.0.0.18`.
 
-#### Security note for unicast
+### Security note for unicast
 
 Unicast changes some of the assumptions normally provided by on-link multicast VRRP. Keep peer-specific firewall rules in place and do not expose protocol 112 broadly.
 
@@ -1147,7 +1431,7 @@ If the deployed Keepalived version supports modern HMAC authentication, it is wo
 
 ---
 
-## 14. Validate the Keepalived Configuration
+# 14. Validate the Keepalived Configuration
 
 On each node:
 
@@ -1188,9 +1472,9 @@ Node B should remain BACKUP while Node A is healthy.
 
 ---
 
-## 15. Verify VIP Ownership
+# 15. Verify VIP Ownership
 
-- Node A:
+## Node A
 
 ```bash
 ip -4 addr show dev <DNS_NODE_A_INTERFACE> | grep <DNS_VIRTUAL_IP>
@@ -1202,7 +1486,7 @@ Expected:
 <DNS_VIRTUAL_IP>
 ```
 
-- Node B:
+## Node B
 
 ```bash
 ip -4 addr show dev <DNS_NODE_B_INTERFACE> | grep <DNS_VIRTUAL_IP>
@@ -1218,7 +1502,7 @@ Only one node should own the VIP at a time.
 
 ---
 
-## 16. Verify VRRP Traffic
+# 16. Verify VRRP Traffic
 
 VRRP uses IP protocol 112.
 
@@ -1248,7 +1532,7 @@ If **both nodes advertise continuously**, investigate:
 
 ---
 
-## 17. Why tcpdump Can See VRRP While Keepalived Cannot
+# 17. Why tcpdump Can See VRRP While Keepalived Cannot
 
 A useful troubleshooting detail:
 
@@ -1287,7 +1571,7 @@ sudo iptables -S
 
 ---
 
-## 18. Test DNS Through the VIP
+# 18. Test DNS Through the VIP
 
 From a third client:
 
@@ -1323,7 +1607,7 @@ dig @<DNS_VIRTUAL_IP> <INTERNAL_DNS_ZONE> SOA +short
 
 ---
 
-## 19. Perform a Real DNS-Service Failover Test
+# 19. Perform a Real DNS-Service Failover Test
 
 The most important test is to stop **Technitium**, not Keepalived.
 
@@ -1413,7 +1697,7 @@ BACKUP
 
 ---
 
-## 20. Expected Steady-State Behavior
+# 20. Expected Steady-State Behavior
 
 Normal operation:
 
@@ -1463,9 +1747,9 @@ Node B
 
 ---
 
-## 21. Troubleshooting
+# 21. Troubleshooting
 
-### Both Nodes Become MASTER
+## Both Nodes Become MASTER
 
 Check VRRP traffic:
 
@@ -1496,7 +1780,7 @@ sudo ufw allow from <DNS_NODE_A_IP> to 224.0.0.18 proto vrrp
 
 ---
 
-### Keepalived Health Check Fails
+## Keepalived Health Check Fails
 
 Test manually:
 
@@ -1520,7 +1804,7 @@ sudo journalctl -u dns -n 100 --no-pager
 
 ---
 
-### VIP Exists on Both Nodes
+## VIP Exists on Both Nodes
 
 Check:
 
@@ -1538,7 +1822,7 @@ Verify:
 
 ---
 
-### UFW systemd Service Says Active but `ufw status` Says Inactive
+## UFW systemd Service Says Active but `ufw status` Says Inactive
 
 This is possible.
 
@@ -1560,7 +1844,7 @@ Make sure SSH and other required access rules are present **before** enabling UF
 
 ---
 
-## 22. Useful Operational Commands
+# 22. Useful Operational Commands
 
 Check Technitium:
 
@@ -1613,7 +1897,7 @@ dig @<DNS_VIRTUAL_IP> example.com
 
 ---
 
-## 23. Firewall Summary
+# 23. Firewall Summary
 
 Minimum inbound services typically required:
 
@@ -1637,13 +1921,13 @@ Optional inbound services:
 
 VRRP-specific rules:
 
-- Node A:
+### Node A
 
 ```bash
 sudo ufw allow from <DNS_NODE_B_IP> to 224.0.0.18 proto vrrp
 ```
 
-- Node B:
+### Node B
 
 ```bash
 sudo ufw allow from <DNS_NODE_A_IP> to 224.0.0.18 proto vrrp
@@ -1653,7 +1937,7 @@ If outbound firewall policy is restrictive and Technitium uses DNS-over-QUIC to 
 
 ---
 
-## 24. Final Validation Checklist
+# 24. Final Validation Checklist
 
 - [ ] Both Technitium instances are healthy.
 - [ ] Technitium configuration is synchronized as intended.
@@ -1676,7 +1960,7 @@ If outbound firewall policy is restrictive and Technitium uses DNS-over-QUIC to 
 
 ---
 
-## 25. Reference Behavior
+# 25. Reference Behavior
 
 The design intentionally uses:
 
@@ -1696,3 +1980,17 @@ DNS unhealthy = not eligible to own VIP
 ```
 
 This is generally preferable to allowing a DNS node with a failed resolver service to retain a reduced but nonzero VRRP priority.
+
+---
+
+# 26. References
+
+Abbreviated references used by this runbook:
+
+- **Technitium Clustering** — Technitium Blog, *Understanding Clustering And How To Configure It*.
+- **Technitium v14** — Technitium Blog, *Technitium DNS Server v14 Released!*.
+- **Technitium Catalog Zones** — Technitium Blog, *Technitium DNS Server v13 Released!*.
+- **systemd time sync** — Debian `timedatectl(1)`, `systemd-timesyncd(8)`, and `timesyncd.conf(5)`.
+- **chrony** — chrony documentation for `chronyc`, source status, tracking, and `chrony.conf`.
+- **Keepalived/VRRP** — Keepalived documentation for VRRP, tracked scripts, multicast/unicast, and IPVS.
+
